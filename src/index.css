@@ -1,0 +1,18 @@
+/* Tailwind v4: this single import pulls in all of Tailwind's styles.
+   No tailwind.config.js or postcss.config.js needed — the @tailwindcss/vite
+   plugin (added in vite.config.ts) handles everything. */
+@import "tailwindcss";
+
+/* A few global defaults for a desktop app: fill the window, no page scroll,
+   and a system font stack that looks native on Windows. */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
