@@ -5,6 +5,7 @@
 
 import type { Workspace } from "../types/workspace";
 import { WorkspaceIcon } from "./WorkspaceIcon";
+import { StartupToggle } from "./StartupToggle";
 
 interface WorkspaceListProps {
   workspaces: Workspace[];
@@ -79,8 +80,8 @@ export function WorkspaceList({
         })}
       </nav>
 
-      {/* New Workspace */}
-      <div className="p-3">
+      {/* Footer: new workspace + settings */}
+      <div className="space-y-1 border-t border-neutral-200 p-3">
         <button
           onClick={onNew}
           className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-neutral-300 px-3 py-2 text-sm font-medium text-neutral-600 transition-colors hover:border-blue-400 hover:text-blue-600"
@@ -88,6 +89,7 @@ export function WorkspaceList({
           <span className="text-base leading-none">+</span>
           New Workspace
         </button>
+        <StartupToggle />
       </div>
     </aside>
   );

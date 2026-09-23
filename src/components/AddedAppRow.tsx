@@ -1,15 +1,15 @@
 // One row in the "apps added to this workspace" list, with an expandable
-// Options panel for command-line arguments.
+// Options panel.
 //
-// For Chrome (and Chromium browsers) the panel is friendly: pick a profile
-// and list the tabs (URLs) to open — we translate those into the actual
-// `--profile-directory=...` flag and URL arguments. For anything else, a plain
-// "one argument per line" box. The resulting args are stored on the app and
-// passed straight to the process at launch.
+// Every app gets a Window layout picker (halves/quarters/maximized/custom).
+// Chrome additionally gets a Profile dropdown and a Tabs box; other apps get a
+// plain "arguments" box. Layout is stored on `app.window`; Chrome extras and
+// generic flags are stored on `app.args`.
 
 import { useState } from "react";
-import type { Application, ChromeProfile } from "../types/workspace";
+import type { Application, ChromeProfile, WindowLayout } from "../types/workspace";
 import { AppIcon } from "./AppIcon";
+import { WindowLayoutPicker, windowModeLabel } from "./WindowLayoutPicker";
 
 interface AddedAppRowProps {
   app: Application;
@@ -25,7 +25,8 @@ function isChrome(path: string): boolean {
   return /chrome\.exe$/i.test(path);
 }
 
-// Split a stored args array back into { profile, tabs } to pre-fill the editor.
+// Chrome args now only carry the profile and the tab URLs (layout moved to
+// app.window). Any legacy --window-* flags are ignored on read.
 function parseChromeArgs(args: string[]): { profile: string; tabs: string[] } {
   let profile = "";
   const tabs: string[] = [];
@@ -36,14 +37,12 @@ function parseChromeArgs(args: string[]): { profile: string; tabs: string[] } {
   return { profile, tabs };
 }
 
-// Build the args array Chrome expects from the editor's profile + tab lines.
 function buildChromeArgs(profile: string, tabLines: string[]): string[] {
   const args: string[] = [];
   if (profile) args.push(PROFILE_FLAG + profile);
   for (const line of tabLines) {
     const url = line.trim();
     if (!url) continue;
-    // Add https:// to bare domains; leave anything with a scheme alone.
     args.push(url.includes("://") ? url : `https://${url}`);
   }
   return args;
@@ -54,21 +53,24 @@ function summarize(
   chrome: boolean,
   profiles: ChromeProfile[],
 ): string {
-  const args = app.args ?? [];
-  if (args.length === 0) return app.path;
+  const bits: string[] = [];
 
   if (chrome) {
-    const { profile, tabs } = parseChromeArgs(args);
-    const parts: string[] = [];
-    if (tabs.length > 0) parts.push(`${tabs.length} tab${tabs.length === 1 ? "" : "s"}`);
+    const { profile, tabs } = parseChromeArgs(app.args ?? []);
+    if (tabs.length > 0) bits.push(`${tabs.length} tab${tabs.length === 1 ? "" : "s"}`);
     if (profile) {
       const match = profiles.find((p) => p.directory === profile);
-      parts.push(match ? match.name : profile);
+      bits.push(match ? match.name : profile);
     }
-    return parts.join(" · ") || app.path;
+  } else if ((app.args?.length ?? 0) > 0) {
+    const n = app.args!.length;
+    bits.push(`${n} argument${n === 1 ? "" : "s"}`);
   }
 
-  return `${args.length} argument${args.length === 1 ? "" : "s"}`;
+  const mode = app.window?.mode;
+  if (mode && mode !== "default") bits.push(windowModeLabel(mode));
+
+  return bits.join(" · ") || app.path;
 }
 
 export function AddedAppRow({
@@ -78,18 +80,26 @@ export function AddedAppRow({
   onRemove,
   onChange,
 }: AddedAppRowProps) {
-  const args = app.args ?? [];
   const chrome = isChrome(app.path);
-
   const [expanded, setExpanded] = useState(false);
 
-  // Local editor state, initialized once from the app's stored args.
-  const initial = parseChromeArgs(args);
+  const initial = parseChromeArgs(app.args ?? []);
   const [profile, setProfile] = useState(initial.profile);
   const [tabsText, setTabsText] = useState(initial.tabs.join("\n"));
-  const [genericText, setGenericText] = useState(args.join("\n"));
+  const [genericText, setGenericText] = useState((app.args ?? []).join("\n"));
 
-  function updateChrome(nextProfile: string, nextTabsText: string) {
+  const field =
+    "w-full rounded-md border border-neutral-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500";
+
+  function setWindow(layout: WindowLayout) {
+    // Store nothing for the plain default, to keep saved data tidy.
+    onChange(index, {
+      ...app,
+      window: layout.mode === "default" ? undefined : layout,
+    });
+  }
+
+  function setChromeArgs(nextProfile: string, nextTabsText: string) {
     setProfile(nextProfile);
     setTabsText(nextTabsText);
     onChange(index, {
@@ -133,6 +143,9 @@ export function AddedAppRow({
 
       {expanded && (
         <div className="mt-2 space-y-3 rounded-lg bg-neutral-50 p-3">
+          {/* Window layout — available for every app */}
+          <WindowLayoutPicker value={app.window} onChange={setWindow} />
+
           {chrome ? (
             <>
               {chromeProfiles.length > 0 && (
@@ -142,8 +155,8 @@ export function AddedAppRow({
                   </label>
                   <select
                     value={profile}
-                    onChange={(e) => updateChrome(e.currentTarget.value, tabsText)}
-                    className="w-full rounded-md border border-neutral-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+                    onChange={(e) => setChromeArgs(e.currentTarget.value, tabsText)}
+                    className={field}
                   >
                     <option value="">Default / any profile</option>
                     {chromeProfiles.map((p) => (
@@ -154,16 +167,17 @@ export function AddedAppRow({
                   </select>
                 </div>
               )}
+
               <div>
                 <label className="mb-1 block text-xs font-medium text-neutral-600">
                   Tabs to open (one URL per line)
                 </label>
                 <textarea
                   value={tabsText}
-                  onChange={(e) => updateChrome(profile, e.currentTarget.value)}
+                  onChange={(e) => setChromeArgs(profile, e.currentTarget.value)}
                   rows={3}
                   placeholder={"youtube.com\ngithub.com\ndiscord.com"}
-                  className="w-full rounded-md border border-neutral-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+                  className={field}
                 />
               </div>
             </>
@@ -177,10 +191,11 @@ export function AddedAppRow({
                 onChange={(e) => updateGeneric(e.currentTarget.value)}
                 rows={3}
                 placeholder={"--some-flag\nvalue"}
-                className="w-full rounded-md border border-neutral-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+                className={field}
               />
             </div>
           )}
+
           <p className="truncate text-xs text-neutral-400">{app.path}</p>
         </div>
       )}

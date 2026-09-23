@@ -15,10 +15,31 @@ use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
+use winapi::shared::minwindef::{BOOL, DWORD, FALSE, LPARAM, TRUE};
+use winapi::shared::windef::HWND;
+use winapi::um::winuser::{
+    EnumWindows, GetWindowThreadProcessId, IsWindowVisible, SetWindowPos, ShowWindow, HWND_TOP,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_MAXIMIZE,
+};
 
 // These structs mirror the TypeScript types in src/types/workspace.ts.
 // `serde` turns them to/from JSON automatically. Field names here match the
 // JSON keys exactly (all lowercase), so no renaming is needed.
+
+/// Where/how to place an app's window. Presets carry explicit pixels computed
+/// by the frontend, so Rust doesn't need to know the screen size.
+#[derive(Serialize, Deserialize, Clone)]
+struct WindowLayout {
+    mode: String, // "default" | "maximized" | "left" | ... | "custom"
+    #[serde(default)]
+    x: Option<i32>,
+    #[serde(default)]
+    y: Option<i32>,
+    #[serde(default)]
+    width: Option<i32>,
+    #[serde(default)]
+    height: Option<i32>,
+}
 
 #[derive(Serialize, Deserialize)]
 struct Application {
@@ -28,6 +49,9 @@ struct Application {
     // old saved data without this field still loads (as an empty list).
     #[serde(default)]
     args: Vec<String>,
+    // Optional window placement. Old saved data without this loads as None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window: Option<WindowLayout>,
 }
 
 /// A Chrome profile: its folder name (used with --profile-directory) and the
@@ -132,18 +156,48 @@ fn launch_workspace(app: AppHandle, id: String) -> Result<Vec<LaunchOutcome>, St
     let mut outcomes = Vec::new();
 
     for application in &workspace.applications {
-        // `spawn()` starts the program and returns immediately — we don't wait
-        // for it. Any args (e.g. Chrome URLs/profile) are passed through.
-        match Command::new(&application.path)
-            .args(&application.args)
-            .spawn()
-        {
-            Ok(_child) => outcomes.push(LaunchOutcome {
-                name: application.name.clone(),
-                path: application.path.clone(),
-                ok: true,
-                error: None,
-            }),
+        let chrome = is_chrome(&application.path);
+        let mut command = Command::new(&application.path);
+
+        if chrome {
+            // Chrome positions reliably via flags. Skip any window flags baked
+            // into args (legacy) and set them from the structured layout.
+            for arg in &application.args {
+                if arg.starts_with("--window-position=")
+                    || arg.starts_with("--window-size=")
+                    || arg == "--start-maximized"
+                {
+                    continue;
+                }
+                command.arg(arg);
+            }
+            if let Some(layout) = &application.window {
+                for flag in chrome_window_flags(layout) {
+                    command.arg(flag);
+                }
+            }
+        } else {
+            command.args(&application.args);
+        }
+
+        match command.spawn() {
+            Ok(child) => {
+                // Non-Chrome apps are positioned via the Windows API once their
+                // window appears (best-effort — see position_window_later).
+                if !chrome {
+                    if let Some(layout) = &application.window {
+                        if layout.mode != "default" {
+                            position_window_later(child.id(), layout.clone());
+                        }
+                    }
+                }
+                outcomes.push(LaunchOutcome {
+                    name: application.name.clone(),
+                    path: application.path.clone(),
+                    ok: true,
+                    error: None,
+                });
+            }
             Err(e) => outcomes.push(LaunchOutcome {
                 name: application.name.clone(),
                 path: application.path.clone(),
@@ -166,6 +220,94 @@ fn friendly_launch_error(e: &std::io::Error) -> String {
         }
         _ => format!("Could not start the application ({e})."),
     }
+}
+
+// --- Window positioning ----------------------------------------------------
+
+fn is_chrome(path: &str) -> bool {
+    path.to_lowercase().ends_with("chrome.exe")
+}
+
+/// Turn a layout into the Chrome flags that place its window.
+fn chrome_window_flags(layout: &WindowLayout) -> Vec<String> {
+    let mut flags = Vec::new();
+    match layout.mode.as_str() {
+        "default" => {}
+        "maximized" => flags.push("--start-maximized".to_string()),
+        _ => {
+            if let (Some(x), Some(y)) = (layout.x, layout.y) {
+                flags.push(format!("--window-position={},{}", x, y));
+            }
+            if let (Some(w), Some(h)) = (layout.width, layout.height) {
+                flags.push(format!("--window-size={},{}", w, h));
+            }
+        }
+    }
+    flags
+}
+
+struct FindWindow {
+    pid: u32,
+    hwnd: HWND,
+}
+
+// Called once per top-level window by EnumWindows. Stops when it finds a
+// visible window owned by the process we're looking for.
+unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let data = &mut *(lparam as *mut FindWindow);
+    let mut window_pid: DWORD = 0;
+    GetWindowThreadProcessId(hwnd, &mut window_pid);
+    if window_pid == data.pid && IsWindowVisible(hwnd) != 0 {
+        data.hwnd = hwnd;
+        return FALSE; // stop enumerating
+    }
+    TRUE
+}
+
+fn find_main_window(pid: u32) -> Option<HWND> {
+    let mut data = FindWindow {
+        pid,
+        hwnd: std::ptr::null_mut(),
+    };
+    unsafe {
+        EnumWindows(Some(enum_windows_proc), &mut data as *mut _ as LPARAM);
+    }
+    if data.hwnd.is_null() {
+        None
+    } else {
+        Some(data.hwnd)
+    }
+}
+
+/// Position a launched app's window once it appears. Best-effort: it polls for
+/// a few seconds and does nothing if no matching window shows up (e.g. the app
+/// launched through a separate launcher process, so the PID never owns a window).
+fn position_window_later(pid: u32, layout: WindowLayout) {
+    std::thread::spawn(move || {
+        for _ in 0..25 {
+            if let Some(hwnd) = find_main_window(pid) {
+                unsafe {
+                    if layout.mode == "maximized" {
+                        ShowWindow(hwnd, SW_MAXIMIZE);
+                    } else if let (Some(x), Some(y), Some(w), Some(h)) =
+                        (layout.x, layout.y, layout.width, layout.height)
+                    {
+                        SetWindowPos(
+                            hwnd,
+                            HWND_TOP,
+                            x,
+                            y,
+                            w,
+                            h,
+                            SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
+                    }
+                }
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
 }
 
 /// Detect installed applications by scanning the Start Menu for shortcuts and
@@ -317,6 +459,14 @@ pub fn run() {
             app.handle()
                 .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
 
+            // Load the autostart plugin. When Windows launches Snap at login it
+            // passes "--minimized", so we can start hidden in the tray.
+            #[cfg(desktop)]
+            app.handle().plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                Some(vec!["--minimized"]),
+            ))?;
+
             // System tray: keeps Snap alive in the background so global
             // shortcuts keep working after the window is closed.
             let show = MenuItem::with_id(app, "show", "Show Snap", true, None::<&str>)?;
@@ -333,6 +483,15 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            // If Windows auto-started us at login, go straight to the tray
+            // instead of popping the window open.
+            #[cfg(desktop)]
+            if std::env::args().any(|arg| arg == "--minimized") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
 
             Ok(())
         })

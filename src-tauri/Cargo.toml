@@ -29,6 +29,12 @@ systemicons = "0.9"
 base64 = "0.22"
 # Global keyboard shortcuts that work even when Snap isn't focused.
 tauri-plugin-global-shortcut = "2"
+# Start Snap automatically when the user logs in to Windows.
+tauri-plugin-autostart = "2"
+# Position non-browser app windows after they launch (Win32 API).
+winapi = { version = "0.3", features = ["winuser", "windef", "minwindef"] }
+# Read the active window's position/size (for the "Capture" button).
+winapi = { version = "0.3", features = ["winuser", "windef"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

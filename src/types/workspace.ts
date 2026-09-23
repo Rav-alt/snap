@@ -4,6 +4,24 @@
 // so keeping them in one place means the whole app agrees on what a
 // "workspace" and an "application" look like.
 
+/** How to place an app's window when it launches. */
+export interface WindowLayout {
+  mode:
+    | "default"
+    | "maximized"
+    | "left"
+    | "right"
+    | "topleft"
+    | "topright"
+    | "bottomleft"
+    | "bottomright"
+    | "custom";
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+}
+
 /** A single application that belongs to a workspace. */
 export interface Application {
   /** Display name, e.g. "Discord". */
@@ -12,6 +30,8 @@ export interface Application {
   path: string;
   /** Extra command-line arguments (e.g. Chrome URLs and --profile-directory). */
   args?: string[];
+  /** Optional window placement. */
+  window?: WindowLayout;
 }
 
 /** A Chrome profile: folder name (for --profile-directory) + display name. */
